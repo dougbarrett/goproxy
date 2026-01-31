@@ -28,6 +28,8 @@ func main() {
 	switch os.Args[1] {
 	case "init":
 		runInit()
+	case "serve":
+		runServe()
 	case "readme":
 		fmt.Print(goproxy.Readme)
 	case "help", "--help", "-h":
@@ -42,12 +44,14 @@ func printUsage() {
 
 Usage:
   goproxy <command> [args...]    Wrap a command with the mock proxy
+  goproxy serve                  Run proxy in standalone mode
   goproxy init                   Create .goproxy/ with a sample config
   goproxy readme                 Show full documentation
 
 Examples:
   goproxy go run ./cmd/app
   goproxy ./mybin --flag1 --flag2
+  goproxy serve
   goproxy init
 
 The proxy loads rules from all .json files in the .goproxy/ directory.
@@ -64,7 +68,14 @@ func runInit() {
 	fmt.Println("Edit .goproxy/example.json to add your proxy rules.")
 }
 
-func runProxy(cmdArgs []string) {
+type proxyInstance struct {
+	server     *proxy.Server
+	httpServer *http.Server
+	proxyURL   string
+	uuid       string
+}
+
+func startProxy() *proxyInstance {
 	configDir := filepath.Join(".", ".goproxy")
 
 	// Load config
@@ -73,7 +84,7 @@ func runProxy(cmdArgs []string) {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 	if len(rules) == 0 {
-		log.Println("No proxy rules loaded — running in passthrough mode")
+		log.Println("No proxy rules loaded — running in catch-all mode")
 	} else {
 		log.Printf("Loaded %d proxy rules", len(rules))
 	}
@@ -112,10 +123,45 @@ func runProxy(cmdArgs []string) {
 	fmt.Printf("    POST %s/__proxy__/%s/clear   - Clear request logs\n", proxyURL, uuid)
 	fmt.Printf("    POST %s/__proxy__/%s/reload  - Reload config\n", proxyURL, uuid)
 	fmt.Printf("    GET  %s/__proxy__/%s/health  - Health check\n\n", proxyURL, uuid)
+
+	return &proxyInstance{
+		server:     srv,
+		httpServer: httpServer,
+		proxyURL:   proxyURL,
+		uuid:       uuid,
+	}
+}
+
+func (p *proxyInstance) shutdown() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	p.httpServer.Shutdown(ctx)
+	p.server.Close()
+}
+
+func runServe() {
+	p := startProxy()
+
+	fmt.Printf("  Configure your app with:\n")
+	fmt.Printf("    export HTTP_PROXY=%s\n", p.proxyURL)
+	fmt.Printf("    export HTTPS_PROXY=%s\n\n", p.proxyURL)
+	fmt.Println("  Press Ctrl+C to stop.")
+
+	// Block until signal
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+
+	fmt.Println("\n  Shutting down...")
+	p.shutdown()
+}
+
+func runProxy(cmdArgs []string) {
+	p := startProxy()
 	fmt.Printf("  Running: %v\n\n", cmdArgs)
 
 	// Start the wrapped command
-	r := runner.New(proxyURL, cmdArgs)
+	r := runner.New(p.proxyURL, cmdArgs)
 	if err := r.Start(); err != nil {
 		log.Fatalf("Failed to start command: %v", err)
 	}
@@ -131,12 +177,7 @@ func runProxy(cmdArgs []string) {
 	// Wait for child to exit
 	exitCode := r.Wait()
 
-	// Shutdown proxy server and close log file
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	httpServer.Shutdown(ctx)
-	srv.Close()
-
+	p.shutdown()
 	os.Exit(exitCode)
 }
 

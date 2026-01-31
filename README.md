@@ -14,11 +14,16 @@ go install github.com/dougbarrett/goproxy/cmd/goproxy@latest
 # Initialize a .goproxy/ directory with a sample config
 goproxy init
 
-# Run your app through the proxy
+# Run your app through the proxy (sets HTTP_PROXY automatically)
 goproxy go run ./cmd/app
+
+# Or run the proxy standalone
+goproxy serve
 ```
 
-When you run `goproxy <command>`, it:
+### Wrapper mode
+
+`goproxy <command>` wraps a subprocess:
 
 1. Starts a proxy server on a random free port
 2. Sets `HTTP_PROXY` and `HTTPS_PROXY` on the child process
@@ -26,6 +31,22 @@ When you run `goproxy <command>`, it:
 4. Returns mock responses for matches, or a catch-all response for everything else
 5. Logs every request to `.goproxy/logs/`
 6. Shuts down cleanly when the child process exits
+
+### Standalone mode
+
+`goproxy serve` runs the proxy by itself, without wrapping a command. It prints the proxy URL so you can point any application at it:
+
+```bash
+goproxy serve
+# => goproxy running on http://127.0.0.1:54321
+
+# In another terminal, configure your app:
+export HTTP_PROXY=http://127.0.0.1:54321
+export HTTPS_PROXY=http://127.0.0.1:54321
+curl http://mockserver.local/api/example
+```
+
+The proxy runs until you press Ctrl+C.
 
 ## Configuration
 
