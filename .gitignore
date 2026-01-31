@@ -12,6 +12,9 @@
 go.work
 go.work.sum
 
+# Proxy logs
+.goproxy/logs/
+
 # IDE
 .idea/
 .vscode/

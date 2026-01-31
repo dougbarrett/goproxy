@@ -127,10 +127,11 @@ func runProxy(cmdArgs []string) {
 	// Wait for child to exit
 	exitCode := r.Wait()
 
-	// Shutdown proxy server
+	// Shutdown proxy server and close log file
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	httpServer.Shutdown(ctx)
+	srv.Close()
 
 	os.Exit(exitCode)
 }

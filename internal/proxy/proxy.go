@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
-	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -42,14 +44,20 @@ type Server struct {
 	logs      []RequestLog
 	uuid      string
 	configDir string
-	transport *http.Transport
+	logFile   *os.File
 }
 
 // NewServer creates a proxy server with compiled rules and a UUID for admin routes.
+// It also opens a timestamped log file in configDir/logs/.
 func NewServer(uuid string, configDir string, ruleConfigs []config.RuleConfig) (*Server, error) {
 	rules, err := compileRules(ruleConfigs)
 	if err != nil {
 		return nil, err
+	}
+
+	logFile, err := openLogFile(configDir, uuid)
+	if err != nil {
+		return nil, fmt.Errorf("opening log file: %w", err)
 	}
 
 	s := &Server{
@@ -57,12 +65,37 @@ func NewServer(uuid string, configDir string, ruleConfigs []config.RuleConfig) (
 		logs:      make([]RequestLog, 0),
 		uuid:      uuid,
 		configDir: configDir,
-		transport: &http.Transport{
-			Proxy: nil, // never proxy forwarded requests (avoid infinite loop)
-		},
+		logFile: logFile,
 	}
 
 	return s, nil
+}
+
+// Close closes the log file. Call this on shutdown.
+func (s *Server) Close() {
+	if s.logFile != nil {
+		s.logFile.Close()
+	}
+}
+
+// openLogFile creates .goproxy/logs/ and opens a timestamped log file for this session.
+func openLogFile(configDir, uuid string) (*os.File, error) {
+	logsDir := filepath.Join(configDir, "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		return nil, err
+	}
+
+	ts := time.Now().Format("2006-01-02T15-04-05")
+	filename := fmt.Sprintf("%s_%s.json", ts, uuid[:8])
+	path := filepath.Join(logsDir, filename)
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("Logging requests to %s", path)
+	return f, nil
 }
 
 func compileRules(configs []config.RuleConfig) ([]MockRule, error) {
@@ -138,8 +171,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.appendLog(logEntry)
 		s.sendMockResponse(w, rule.Response, bodyBytes)
 	} else {
-		// Forward the request to the real destination
-		s.forwardRequest(w, r, bodyBytes, &logEntry)
+		// Catch-all: return a default mock response
+		logEntry.MatchedRule = "_catch_all"
+		logEntry.StatusCode = http.StatusOK
+		s.appendLog(logEntry)
+		s.sendCatchAllResponse(w, r)
 	}
 }
 
@@ -203,41 +239,16 @@ func deepCopyMap(v any) (map[string]any, bool) {
 	return cp, true
 }
 
-func (s *Server) forwardRequest(w http.ResponseWriter, r *http.Request, body []byte, logEntry *RequestLog) {
-	outURL := r.URL.String()
-	if r.URL.Host == "" {
-		outURL = "http://" + r.Host + r.URL.RequestURI()
-	}
-
-	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, outURL, io.NopCloser(strings.NewReader(string(body))))
-	if err != nil {
-		logEntry.StatusCode = http.StatusBadGateway
-		s.appendLog(*logEntry)
-		http.Error(w, "failed to create forward request", http.StatusBadGateway)
-		return
-	}
-	outReq.Header = r.Header.Clone()
-	outReq.Header.Del("Proxy-Connection")
-
-	resp, err := s.transport.RoundTrip(outReq)
-	if err != nil {
-		logEntry.StatusCode = http.StatusBadGateway
-		s.appendLog(*logEntry)
-		http.Error(w, fmt.Sprintf("proxy forward error: %v", err), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	logEntry.StatusCode = resp.StatusCode
-	s.appendLog(*logEntry)
-
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+func (s *Server) sendCatchAllResponse(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
+		"success":   true,
+		"message":   "Request captured by goproxy (no matching rule)",
+		"method":    r.Method,
+		"url":       r.URL.String(),
+		"timestamp": time.Now().Format(time.RFC3339),
+	})
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
@@ -324,6 +335,13 @@ func (s *Server) appendLog(entry RequestLog) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.logs = append(s.logs, entry)
-	logJSON, _ := json.MarshalIndent(entry, "", "  ")
+
+	logJSON, _ := json.Marshal(entry)
 	log.Printf("Request: %s", logJSON)
+
+	// Write to session log file
+	if s.logFile != nil {
+		s.logFile.Write(logJSON)
+		s.logFile.Write([]byte("\n"))
+	}
 }
