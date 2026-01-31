@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	goproxy "github.com/dougbarrett/goproxy"
 	"github.com/dougbarrett/goproxy/internal/config"
 	"github.com/dougbarrett/goproxy/internal/proxy"
 	"github.com/dougbarrett/goproxy/internal/runner"
@@ -27,6 +28,8 @@ func main() {
 	switch os.Args[1] {
 	case "init":
 		runInit()
+	case "readme":
+		fmt.Print(goproxy.Readme)
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -40,6 +43,7 @@ func printUsage() {
 Usage:
   goproxy <command> [args...]    Wrap a command with the mock proxy
   goproxy init                   Create .goproxy/ with a sample config
+  goproxy readme                 Show full documentation
 
 Examples:
   goproxy go run ./cmd/app
